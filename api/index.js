@@ -138,7 +138,7 @@ const VALID_TYPES = ['song', 'video', 'artist', 'playlist', 'album'];
 
 app.get('/api/search', async (req, res) => {
   const query = req.query.q;
-  const type = req.query.type;
+  let type = req.query.type;
 
   if (!query) {
     return res.status(400).json({ error: 'Manca il parametro di ricerca "q"' });
@@ -147,23 +147,33 @@ app.get('/api/search', async (req, res) => {
   try {
     const yt = await getYT();
     const filters = {};
+
     if (type && VALID_TYPES.includes(type)) {
       filters.type = type;
     }
 
-    // yt.music.search restituisce un oggetto complesso, lo passiamo tutto a normalize
-    const raw = await yt.music.search(query, filters);
+    let raw;
+    
+    // SOLUZIONE COPYRIGHT: Cerca su YouTube normale per i brani, 
+    // così il player IFrame non bloccherà la riproduzione.
+    if (type === 'song' || type === 'video' || !type) {
+      raw = await yt.search(query, { type: 'video' }); 
+    } else {
+      // Per artisti, playlist e album usiamo YouTube Music
+      raw = await yt.music.search(query, filters);
+    }
+
     const tracks = normalizeShelfResults(raw);
 
     return res.json({
       query,
-      type: filters.type || 'all',
+      type: type || 'video',
       count: tracks.length,
       tracks
     });
   } catch (err) {
     console.error('Errore durante la ricerca API:', err);
-    ytInstance = null; // Resetta sessione in caso di crash
+    ytInstance = null;
     ytInstancePromise = null;
     return res.status(500).json({ error: 'Errore interno del server', detail: String(err.message || err) });
   }
@@ -176,8 +186,6 @@ app.get('/api/artist', async (req, res) => {
   try {
     const yt = await getYT();
     const artistData = await yt.music.getArtist(id);
-    
-    // getArtist restituisce varie sezioni, ci interessa soprattutto songs
     const tracks = normalizeShelfResults(artistData);
     return res.json({ tracks });
   } catch (err) {
@@ -195,7 +203,6 @@ app.get('/api/playlist', async (req, res) => {
   try {
     const yt = await getYT();
     const playlistData = await yt.music.getPlaylist(id);
-    
     const tracks = normalizeShelfResults(playlistData);
     return res.json({ tracks });
   } catch (err) {
