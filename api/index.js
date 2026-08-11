@@ -4,15 +4,30 @@ import { Innertube } from 'youtubei.js';
 
 const app = express();
 
-app.use(cors());
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 app.use(express.json());
 
-let yt = null;
+let ytInstance = null;
+
 async function getYT() {
-  if (!yt) {
-    yt = await Innertube.create({ lang: 'it', location: 'IT', retrieve_player: false });
+  if (!ytInstance) {
+    try {
+      ytInstance = await Innertube.create({
+        lang: 'it',
+        location: 'IT',
+        retrieve_player: false
+      });
+    } catch (err) {
+      console.error('Errore durante la creazione dell\'istanza Innertube:', err);
+      ytInstance = null;
+      throw err;
+    }
   }
-  return yt;
+  return ytInstance;
 }
 
 function pickThumb(item) {
@@ -23,6 +38,7 @@ function pickThumb(item) {
     item?.thumbnails,
     item?.author?.thumbnails,
   ].filter(Boolean);
+  
   for (const arr of candidates) {
     if (Array.isArray(arr) && arr.length) {
       const best = arr[arr.length - 1];
@@ -57,19 +73,30 @@ function pickId(item) {
 function normalizeShelfResults(data) {
   const out = [];
   const seen = new Set();
+  
   const walk = (node) => {
     if (!node) return;
-    if (Array.isArray(node)) { node.forEach(walk); return; }
-    const contents = node.contents || node.items || null;
-    if (Array.isArray(contents)) contents.forEach(walk);
+    if (Array.isArray(node)) {
+      node.forEach(walk);
+      return;
+    }
+    const contents = node.contents || node.items || node.results || null;
+    if (Array.isArray(contents)) {
+      contents.forEach(walk);
+    }
+    
     const id = pickId(node);
     if (id && !seen.has(id)) {
       seen.add(id);
       
       let kind = 'song';
-      if (node.type === 'Artist' || node.endpoint?.browse_id?.startsWith('UC')) kind = 'artist';
-      else if (node.type === 'Playlist' || id.startsWith('PL') || node.is_playlist) kind = 'playlist';
-      else if (node.type === 'Album' || node.is_album) kind = 'album';
+      if (node.type === 'Artist' || node.endpoint?.browse_id?.startsWith('UC')) {
+        kind = 'artist';
+      } else if (node.type === 'Playlist' || id.startsWith('PL') || node.is_playlist) {
+        kind = 'playlist';
+      } else if (node.type === 'Album' || node.is_album) {
+        kind = 'album';
+      }
 
       out.push({
         id,
@@ -82,7 +109,8 @@ function normalizeShelfResults(data) {
       });
     }
   };
-  walk(data?.results || data?.contents || data);
+
+  walk(data);
   return out;
 }
 
@@ -97,11 +125,13 @@ app.get('/api/search', async (req, res) => {
   }
 
   try {
-    const ytInstance = await getYT();
+    const yt = await getYT();
     const filters = {};
-    if (type && VALID_TYPES.includes(type)) filters.type = type;
+    if (type && VALID_TYPES.includes(type)) {
+      filters.type = type;
+    }
 
-    const raw = await ytInstance.music.search(query, filters);
+    const raw = await yt.music.search(query, filters);
     const tracks = normalizeShelfResults(raw);
 
     return res.json({
@@ -111,7 +141,9 @@ app.get('/api/search', async (req, res) => {
       tracks
     });
   } catch (err) {
-    console.error('Errore durante la ricerca:', err);
+    console.error('Errore durante la ricerca API:', err);
+    // Tenta di resettare l'istanza in caso di errore critico di sessione
+    ytInstance = null;
     return res.status(500).json({ error: 'Errore interno del server', detail: String(err) });
   }
 });
@@ -121,13 +153,13 @@ app.get('/api/artist', async (req, res) => {
   if (!id) return res.status(400).json({ error: 'Manca ID artista' });
 
   try {
-    const ytInstance = await getYT();
-    const artistData = await ytInstance.music.getArtist(id);
+    const yt = await getYT();
+    const artistData = await yt.music.getArtist(id);
     const tracks = normalizeShelfResults(artistData);
-    res.json({ tracks });
+    return res.json({ tracks });
   } catch (err) {
     console.error('Errore caricamento artista:', err);
-    res.status(500).json({ error: 'Errore interno' });
+    return res.status(500).json({ error: 'Errore interno', detail: String(err) });
   }
 });
 
@@ -136,17 +168,17 @@ app.get('/api/playlist', async (req, res) => {
   if (!id) return res.status(400).json({ error: 'Manca ID playlist' });
 
   try {
-    const ytInstance = await getYT();
-    const playlistData = await ytInstance.music.getPlaylist(id);
+    const yt = await getYT();
+    const playlistData = await yt.music.getPlaylist(id);
     const tracks = normalizeShelfResults(playlistData);
-    res.json({ tracks });
+    return res.json({ tracks });
   } catch (err) {
     console.error('Errore caricamento playlist:', err);
-    res.status(500).json({ error: 'Errore interno' });
+    return res.status(500).json({ error: 'Errore interno', detail: String(err) });
   }
 });
 
-app.get('/api', (req, res) => res.json({ ok: true }));
-app.get('/', (req, res) => res.json({ ok: true }));
+app.get('/api', (req, res) => res.json({ status: 'online', service: 'AliceMusic API' }));
+app.get('/', (req, res) => res.json({ status: 'online', service: 'AliceMusic API' }));
 
 export default app;
