@@ -12,22 +12,30 @@ app.use(cors({
 app.use(express.json());
 
 let ytInstance = null;
+let ytInstancePromise = null;
 
+// Evita race conditions se più richieste arrivano contemporaneamente
 async function getYT() {
-  if (!ytInstance) {
+  if (ytInstance) return ytInstance;
+  if (ytInstancePromise) return ytInstancePromise;
+
+  ytInstancePromise = (async () => {
     try {
-      ytInstance = await Innertube.create({
+      const instance = await Innertube.create({
         lang: 'it',
         location: 'IT',
         retrieve_player: false
       });
+      ytInstance = instance;
+      return instance;
     } catch (err) {
       console.error('Errore durante la creazione dell\'istanza Innertube:', err);
-      ytInstance = null;
+      ytInstancePromise = null; // Resetta per permettere un nuovo tentativo
       throw err;
     }
-  }
-  return ytInstance;
+  })();
+
+  return ytInstancePromise;
 }
 
 function pickThumb(item) {
@@ -42,7 +50,7 @@ function pickThumb(item) {
   for (const arr of candidates) {
     if (Array.isArray(arr) && arr.length) {
       const best = arr[arr.length - 1];
-      if (best?.url) return best.url;
+      if (best?.url) return best.url.startsWith('//') ? `https:${best.url}` : best.url;
     }
   }
   if (item?.id) return `https://i.ytimg.com/vi/${item.id}/mqdefault.jpg`;
@@ -53,10 +61,10 @@ function pickArtist(item) {
   if (Array.isArray(item?.artists) && item.artists.length) {
     return item.artists.map(a => a?.name).filter(Boolean).join(', ');
   }
-  if (item?.artist?.name) return item.artist.name;
-  if (typeof item?.artist === 'string') return item.artist;
   if (item?.author?.name) return item.author.name;
   if (typeof item?.author === 'string') return item.author;
+  if (item?.artist?.name) return item.artist.name;
+  if (typeof item?.artist === 'string') return item.artist;
   return 'Sconosciuto';
 }
 
@@ -66,8 +74,15 @@ function pickTitle(item) {
   return 'Senza titolo';
 }
 
+// Estrae l'ID corretto in base al tipo di contenuto
 function pickId(item) {
-  return item?.id || item?.video_id || item?.videoId || item?.playlistId || null;
+  if (item?.id) return item.id;
+  if (item?.video_id) return item.video_id;
+  if (item?.videoId) return item.videoId;
+  if (item?.endpoint?.playlist_id) return item.endpoint.playlist_id;
+  if (item?.endpoint?.browse_id) return item.endpoint.browse_id;
+  if (item?.playlistId) return item.playlistId;
+  return null;
 }
 
 function normalizeShelfResults(data) {
@@ -80,7 +95,8 @@ function normalizeShelfResults(data) {
       node.forEach(walk);
       return;
     }
-    const contents = node.contents || node.items || node.results || null;
+    
+    const contents = node.contents || node.items || node.results || node.videos || null;
     if (Array.isArray(contents)) {
       contents.forEach(walk);
     }
@@ -90,13 +106,13 @@ function normalizeShelfResults(data) {
       seen.add(id);
       
       let kind = 'song';
-      if (node.type === 'Artist' || node.endpoint?.browse_id?.startsWith('UC')) {
-        kind = 'artist';
-      } else if (node.type === 'Playlist' || id.startsWith('PL') || node.is_playlist) {
-        kind = 'playlist';
-      } else if (node.type === 'Album' || node.is_album) {
-        kind = 'album';
-      }
+      let isArtist = node.type === 'Artist' || (node.endpoint?.browse_id?.startsWith('UC') && !node.endpoint?.playlist_id);
+      let isPlaylist = node.type === 'Playlist' || node.endpoint?.playlist_id || id.startsWith('PL');
+      let isAlbum = node.type === 'Album' || node.is_album;
+
+      if (isArtist) kind = 'artist';
+      else if (isPlaylist) kind = 'playlist';
+      else if (isAlbum) kind = 'album';
 
       out.push({
         id,
@@ -110,7 +126,11 @@ function normalizeShelfResults(data) {
     }
   };
 
-  walk(data);
+  try {
+    walk(data);
+  } catch (e) {
+    console.error("Errore durante normalizeShelfResults:", e);
+  }
   return out;
 }
 
@@ -131,6 +151,7 @@ app.get('/api/search', async (req, res) => {
       filters.type = type;
     }
 
+    // yt.music.search restituisce un oggetto complesso, lo passiamo tutto a normalize
     const raw = await yt.music.search(query, filters);
     const tracks = normalizeShelfResults(raw);
 
@@ -142,9 +163,9 @@ app.get('/api/search', async (req, res) => {
     });
   } catch (err) {
     console.error('Errore durante la ricerca API:', err);
-    // Tenta di resettare l'istanza in caso di errore critico di sessione
-    ytInstance = null;
-    return res.status(500).json({ error: 'Errore interno del server', detail: String(err) });
+    ytInstance = null; // Resetta sessione in caso di crash
+    ytInstancePromise = null;
+    return res.status(500).json({ error: 'Errore interno del server', detail: String(err.message || err) });
   }
 });
 
@@ -155,11 +176,15 @@ app.get('/api/artist', async (req, res) => {
   try {
     const yt = await getYT();
     const artistData = await yt.music.getArtist(id);
+    
+    // getArtist restituisce varie sezioni, ci interessa soprattutto songs
     const tracks = normalizeShelfResults(artistData);
     return res.json({ tracks });
   } catch (err) {
     console.error('Errore caricamento artista:', err);
-    return res.status(500).json({ error: 'Errore interno', detail: String(err) });
+    ytInstance = null;
+    ytInstancePromise = null;
+    return res.status(500).json({ error: 'Errore interno', detail: String(err.message || err) });
   }
 });
 
@@ -170,11 +195,14 @@ app.get('/api/playlist', async (req, res) => {
   try {
     const yt = await getYT();
     const playlistData = await yt.music.getPlaylist(id);
+    
     const tracks = normalizeShelfResults(playlistData);
     return res.json({ tracks });
   } catch (err) {
     console.error('Errore caricamento playlist:', err);
-    return res.status(500).json({ error: 'Errore interno', detail: String(err) });
+    ytInstance = null;
+    ytInstancePromise = null;
+    return res.status(500).json({ error: 'Errore interno', detail: String(err.message || err) });
   }
 });
 
