@@ -15,7 +15,6 @@ async function getYT() {
   return yt;
 }
 
-// Funzione di normalizzazione dei risultati di YouTube
 function pickThumb(item) {
   const candidates = [
     item?.thumbnail?.contents,
@@ -52,7 +51,7 @@ function pickTitle(item) {
 }
 
 function pickId(item) {
-  return item?.id || item?.video_id || item?.videoId || null;
+  return item?.id || item?.video_id || item?.videoId || item?.playlistId || null;
 }
 
 function normalizeShelfResults(data) {
@@ -66,6 +65,12 @@ function normalizeShelfResults(data) {
     const id = pickId(node);
     if (id && !seen.has(id)) {
       seen.add(id);
+      
+      let kind = 'song';
+      if (node.type === 'Artist' || node.endpoint?.browse_id?.startsWith('UC')) kind = 'artist';
+      else if (node.type === 'Playlist' || id.startsWith('PL') || node.is_playlist) kind = 'playlist';
+      else if (node.type === 'Album' || node.is_album) kind = 'album';
+
       out.push({
         id,
         title: pickTitle(node),
@@ -73,7 +78,7 @@ function normalizeShelfResults(data) {
         thumb: pickThumb(node),
         album: node.album?.name || null,
         duration: node.duration?.text || null,
-        kind: node.type || 'song'
+        kind
       });
     }
   };
@@ -83,7 +88,6 @@ function normalizeShelfResults(data) {
 
 const VALID_TYPES = ['song', 'video', 'artist', 'playlist', 'album'];
 
-// Endpoint principale aggiornato con il prefisso /api/search richiesto dal frontend
 app.get('/api/search', async (req, res) => {
   const query = req.query.q;
   const type = req.query.type;
@@ -108,20 +112,41 @@ app.get('/api/search', async (req, res) => {
     });
   } catch (err) {
     console.error('Errore durante la ricerca:', err);
-    return res.status(500).json({
-      error: 'Errore interno del server',
-      detail: String(err?.message || err)
-    });
+    return res.status(500).json({ error: 'Errore interno del server', detail: String(err) });
   }
 });
 
-// Endpoint di stato per verificare che la function risponda
-app.get('/api', (req, res) => {
-  res.json({ ok: true, message: 'AliceMusic backend attivo.' });
+app.get('/api/artist', async (req, res) => {
+  const id = req.query.id;
+  if (!id) return res.status(400).json({ error: 'Manca ID artista' });
+
+  try {
+    const ytInstance = await getYT();
+    const artistData = await ytInstance.music.getArtist(id);
+    const tracks = normalizeShelfResults(artistData);
+    res.json({ tracks });
+  } catch (err) {
+    console.error('Errore caricamento artista:', err);
+    res.status(500).json({ error: 'Errore interno' });
+  }
 });
 
-app.get('/', (req, res) => {
-  res.json({ ok: true, message: 'AliceMusic backend attivo.' });
+app.get('/api/playlist', async (req, res) => {
+  const id = req.query.id;
+  if (!id) return res.status(400).json({ error: 'Manca ID playlist' });
+
+  try {
+    const ytInstance = await getYT();
+    const playlistData = await ytInstance.music.getPlaylist(id);
+    const tracks = normalizeShelfResults(playlistData);
+    res.json({ tracks });
+  } catch (err) {
+    console.error('Errore caricamento playlist:', err);
+    res.status(500).json({ error: 'Errore interno' });
+  }
 });
+
+app.get('/api', (req, res) => res.json({ ok: true }));
+app.get('/', (req, res) => res.json({ ok: true }));
 
 export default app;
